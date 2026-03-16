@@ -1,12 +1,21 @@
-import asyncio
 import json
 import logging
 import os
+import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
 
-import aiohttp
-from redis import asyncio as redis
+from redis import Redis
+from redis.exceptions import RedisError
+
+from workers.queue import (
+    connect_redis,
+    pop_scrape_task,
+    push_processing_result,
+)
+from workers.scraper import ScrapeError, scrape_page
 
 
 def configure_logging() -> None:
@@ -20,118 +29,118 @@ configure_logging()
 logger = logging.getLogger("scraper-worker")
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
-SCRAPE_QUEUE_NAME = os.getenv("SCRAPE_QUEUE_NAME", "scrape_tasks")
+SCRAPE_QUEUE_NAME = os.getenv("SCRAPE_QUEUE_NAME", "scrape_queue")
+LEGACY_SCRAPE_QUEUE_NAME = os.getenv("LEGACY_SCRAPE_QUEUE_NAME", "scrape_tasks")
 PROCESS_QUEUE_NAME = os.getenv("PROCESS_QUEUE_NAME", "processing_tasks")
-WORKER_CONCURRENCY = int(os.getenv("WORKER_CONCURRENCY", "5"))
+DEFAULT_REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "20"))
+POLL_TIMEOUT_SECONDS = int(os.getenv("QUEUE_POLL_TIMEOUT", "5"))
+RETRY_DELAY_SECONDS = int(os.getenv("WORKER_RETRY_DELAY", "5"))
 
 
-async def fetch_payload(
-    session: aiohttp.ClientSession,
-    url: str,
-    request_timeout: int,
-) -> tuple[Any, str, int]:
-    timeout = aiohttp.ClientTimeout(total=request_timeout)
-
-    async with session.get(url, timeout=timeout) as response:
-        response.raise_for_status()
-        content_type = response.headers.get("Content-Type", "application/octet-stream")
-
-        if "application/json" in content_type:
-            data = await response.json(content_type=None)
-        else:
-            data = await response.text()
-
-        return data, content_type, response.status
+def now_utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
-async def publish_result(redis_client: redis.Redis, message: dict[str, Any]) -> None:
-    await redis_client.rpush(PROCESS_QUEUE_NAME, json.dumps(message, default=str))
-
-
-async def handle_job(
-    redis_client: redis.Redis,
-    session: aiohttp.ClientSession,
-    payload: str,
-) -> None:
+def normalize_task(payload: str) -> dict[str, Any]:
     task_data = json.loads(payload)
+    task_data.setdefault("task_id", str(uuid.uuid4()))
+    task_data.setdefault("source", "manual")
+    task_data.setdefault("metadata", {})
+    task_data.setdefault("request_timeout", DEFAULT_REQUEST_TIMEOUT)
+    return task_data
+
+
+def is_valid_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def build_success_result(task_data: dict[str, Any], scraped_data: dict[str, Any]) -> dict[str, Any]:
     task_id = task_data["task_id"]
     url = task_data["url"]
     source = task_data.get("source", "manual")
-    request_timeout = int(task_data.get("request_timeout", 20))
+    return {
+        "task_id": task_id,
+        "url": url,
+        "source": source,
+        "status": "success",
+        "raw_data": scraped_data,
+        "metadata": task_data.get("metadata", {}),
+        "scraped_at": now_utc_iso(),
+    }
 
-    logger.info("Fetching task %s from %s", task_id, url)
+
+def build_failure_result(task_data: dict[str, Any], error_message: str) -> dict[str, Any]:
+    return {
+        "task_id": task_data["task_id"],
+        "url": task_data.get("url", ""),
+        "source": task_data.get("source", "manual"),
+        "status": "failed",
+        "error": error_message,
+        "metadata": task_data.get("metadata", {}),
+        "scraped_at": now_utc_iso(),
+    }
+
+
+def process_single_task(redis_client: Redis, payload: str) -> None:
+    task_data = normalize_task(payload)
+    url = task_data.get("url", "")
+
+    if not isinstance(url, str) or not is_valid_url(url):
+        logger.warning("Task %s rejected due to invalid URL: %s", task_data["task_id"], url)
+        result = build_failure_result(task_data, f"Invalid URL: {url}")
+        push_processing_result(redis_client, PROCESS_QUEUE_NAME, result)
+        return
+
+    request_timeout = int(task_data.get("request_timeout", DEFAULT_REQUEST_TIMEOUT))
+    logger.info("Scraping task %s from %s", task_data["task_id"], url)
 
     try:
-        raw_data, content_type, status_code = await fetch_payload(session, url, request_timeout)
-        result = {
-            "task_id": task_id,
-            "url": url,
-            "source": source,
-            "status": "success",
-            "http_status": status_code,
-            "content_type": content_type,
-            "raw_data": raw_data,
-            "metadata": task_data.get("metadata", {}),
-            "scraped_at": datetime.now(timezone.utc).isoformat(),
-        }
-        await publish_result(redis_client, result)
-        logger.info("Task %s fetched successfully", task_id)
+        scraped_data = scrape_page(url, timeout=request_timeout)
+        result = build_success_result(task_data, scraped_data)
+        push_processing_result(redis_client, PROCESS_QUEUE_NAME, result)
+        logger.info("Task %s processed successfully", task_data["task_id"])
+    except ScrapeError as exc:
+        logger.warning("Task %s failed: %s", task_data["task_id"], exc)
+        result = build_failure_result(task_data, str(exc))
+        push_processing_result(redis_client, PROCESS_QUEUE_NAME, result)
     except Exception as exc:
-        logger.exception("Task %s failed", task_id)
-        result = {
-            "task_id": task_id,
-            "url": url,
-            "source": source,
-            "status": "failed",
-            "error": str(exc),
-            "metadata": task_data.get("metadata", {}),
-            "scraped_at": datetime.now(timezone.utc).isoformat(),
-        }
-        await publish_result(redis_client, result)
+        logger.exception("Task %s crashed", task_data["task_id"])
+        result = build_failure_result(task_data, f"Unhandled worker error: {exc}")
+        push_processing_result(redis_client, PROCESS_QUEUE_NAME, result)
 
 
-def log_task_result(task: asyncio.Task[None]) -> None:
-    try:
-        task.result()
-    except asyncio.CancelledError:
-        logger.warning("Worker task cancelled")
-    except Exception:
-        logger.exception("Unhandled worker task failure")
+def run_worker() -> None:
+    redis_client = connect_redis(REDIS_URL)
+    queue_names = [SCRAPE_QUEUE_NAME]
+    if LEGACY_SCRAPE_QUEUE_NAME and LEGACY_SCRAPE_QUEUE_NAME != SCRAPE_QUEUE_NAME:
+        queue_names.append(LEGACY_SCRAPE_QUEUE_NAME)
+
+    logger.info("Worker started. Listening on queues: %s", ", ".join(queue_names))
+
+    while True:
+        queue_item = pop_scrape_task(redis_client, queue_names, POLL_TIMEOUT_SECONDS)
+        if queue_item is None:
+            continue
+
+        _, payload = queue_item
+        process_single_task(redis_client, payload)
 
 
-async def run_worker() -> None:
-    redis_client = redis.from_url(REDIS_URL, decode_responses=True)
-    connector = aiohttp.TCPConnector(limit_per_host=max(WORKER_CONCURRENCY * 2, 10))
-    headers = {"User-Agent": "LocalDataPlatformWorker/0.1"}
-
-    async with aiohttp.ClientSession(connector=connector, headers=headers) as session:
-        active_tasks: set[asyncio.Task[None]] = set()
-
-        while True:
-            active_tasks = {task for task in active_tasks if not task.done()}
-
-            if len(active_tasks) >= WORKER_CONCURRENCY:
-                await asyncio.wait(active_tasks, return_when=asyncio.FIRST_COMPLETED)
-                continue
-
-            queue_item = await redis_client.blpop(SCRAPE_QUEUE_NAME, timeout=5)
-            if queue_item is None:
-                continue
-
-            _, payload = queue_item
-            job = asyncio.create_task(handle_job(redis_client, session, payload))
-            job.add_done_callback(log_task_result)
-            active_tasks.add(job)
-
-
-async def main() -> None:
+def main() -> None:
     while True:
         try:
-            await run_worker()
-        except Exception:
+            run_worker()
+        except RedisError:
             logger.exception("Worker loop crashed, retrying in 5 seconds")
-            await asyncio.sleep(5)
+            time.sleep(RETRY_DELAY_SECONDS)
+        except Exception:
+            logger.exception("Unexpected fatal worker error, retrying in 5 seconds")
+            time.sleep(RETRY_DELAY_SECONDS)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

@@ -16,7 +16,7 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://app:app@postgres:5432/local_data}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      SCRAPE_QUEUE_NAME: ${SCRAPE_QUEUE_NAME:-scrape_tasks}
+      SCRAPE_QUEUE_NAME: ${SCRAPE_QUEUE_NAME:-scrape_queue}
       PROCESS_QUEUE_NAME: ${PROCESS_QUEUE_NAME:-processing_tasks}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
@@ -37,7 +37,7 @@ services:
       context: ./workers
     environment:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      SCRAPE_QUEUE_NAME: ${SCRAPE_QUEUE_NAME:-scrape_tasks}
+      SCRAPE_QUEUE_NAME: ${SCRAPE_QUEUE_NAME:-scrape_queue}
       PROCESS_QUEUE_NAME: ${PROCESS_QUEUE_NAME:-processing_tasks}
       WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-5}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
