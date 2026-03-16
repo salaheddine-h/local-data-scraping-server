@@ -1,0 +1,90 @@
+services:
+  nginx:
+    image: nginx:1.27-alpine
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ./api
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://app:app@postgres:5432/local_data}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      SCRAPE_QUEUE_NAME: ${SCRAPE_QUEUE_NAME:-scrape_tasks}
+      PROCESS_QUEUE_NAME: ${PROCESS_QUEUE_NAME:-processing_tasks}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/status', timeout=5).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  scraper-worker:
+    build:
+      context: ./workers
+    environment:
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      SCRAPE_QUEUE_NAME: ${SCRAPE_QUEUE_NAME:-scrape_tasks}
+      PROCESS_QUEUE_NAME: ${PROCESS_QUEUE_NAME:-processing_tasks}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-5}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  processor:
+    build:
+      context: ./processor
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://app:app@postgres:5432/local_data}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      PROCESS_QUEUE_NAME: ${PROCESS_QUEUE_NAME:-processing_tasks}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-local_data}
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  pgdata:
