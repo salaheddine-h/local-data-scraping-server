@@ -1,190 +1,99 @@
-import html
 import json
 import logging
 import os
-import re
 import time
-from datetime import datetime, timezone
-from typing import Any
 
 import psycopg
 import redis
-from psycopg.types.json import Jsonb
 
-
-def configure_logging() -> None:
-    logging.basicConfig(
-        level=os.getenv("LOG_LEVEL", "INFO"),
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    )
-
-
-configure_logging()
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger("processor")
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://app:app@postgres:5432/local_data")
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
-PROCESS_QUEUE_NAME = os.getenv("PROCESS_QUEUE_NAME", "processing_tasks")
+PROCESS_QUEUE = "processing_tasks"
 
 
-def get_redis_client() -> redis.Redis:
+def get_redis() -> redis.Redis:
     return redis.Redis.from_url(REDIS_URL, decode_responses=True)
 
 
-def get_db_connection() -> psycopg.Connection:
-    return psycopg.connect(DATABASE_URL, autocommit=True)
+def get_db() -> psycopg.Connection:
+    return psycopg.connect(DATABASE_URL)
 
 
-def collapse_whitespace(value: str) -> str:
-    return re.sub(r"\s+", " ", value).strip()
+def process_tasks():
+    redis_client = get_redis()
+    db_conn = get_db()
 
+    logger.info("Processor listening on queue: %s", PROCESS_QUEUE)
 
-def strip_html(value: str) -> str:
-    return collapse_whitespace(re.sub(r"<[^>]+>", " ", html.unescape(value)))
-
-
-def pick_text_field(data: dict[str, Any], candidates: list[str]) -> str | None:
-    for key in candidates:
-        value = data.get(key)
-        if isinstance(value, str) and value.strip():
-            return collapse_whitespace(value)
-    return None
-
-
-def normalize_item(item: Any, source: str, url: str, task_id: str) -> dict[str, Any]:
-    if isinstance(item, dict):
-        title = pick_text_field(item, ["title", "name", "headline"])
-        content = pick_text_field(item, ["body", "description", "content", "text", "summary"])
-        return {
-            "task_id": task_id,
-            "source": source,
-            "url": url,
-            "title": title,
-            "content": content,
-            "raw_payload": item,
-            "cleaned_payload": item,
-            "status": "processed",
-            "error_message": None,
-        }
-
-    if isinstance(item, str):
-        cleaned_text = strip_html(item)
-        title = cleaned_text[:80] if cleaned_text else None
-        return {
-            "task_id": task_id,
-            "source": source,
-            "url": url,
-            "title": title,
-            "content": cleaned_text or None,
-            "raw_payload": {"text": item},
-            "cleaned_payload": {"text": cleaned_text},
-            "status": "processed",
-            "error_message": None,
-        }
-
-    serialized = collapse_whitespace(json.dumps(item, default=str))
-    return {
-        "task_id": task_id,
-        "source": source,
-        "url": url,
-        "title": serialized[:80] if serialized else None,
-        "content": serialized or None,
-        "raw_payload": {"value": item},
-        "cleaned_payload": {"value": item},
-        "status": "processed",
-        "error_message": None,
-    }
-
-
-def normalize_message(message: dict[str, Any]) -> list[dict[str, Any]]:
-    task_id = message["task_id"]
-    source = message.get("source", "manual")
-    url = message["url"]
-
-    if message.get("status") != "success":
-        return [
-            {
-                "task_id": task_id,
-                "source": source,
-                "url": url,
-                "title": None,
-                "content": None,
-                "raw_payload": message,
-                "cleaned_payload": None,
-                "status": "failed",
-                "error_message": message.get("error", "Unknown scraping error"),
-            }
-        ]
-
-    raw_data = message.get("raw_data")
-    if isinstance(raw_data, list):
-        items = raw_data
-    else:
-        items = [raw_data]
-
-    return [normalize_item(item, source, url, task_id) for item in items]
-
-
-def persist_records(connection: psycopg.Connection, records: list[dict[str, Any]]) -> None:
-    insert_sql = """
-        INSERT INTO datasets (
-            task_id,
-            source,
-            url,
-            title,
-            content,
-            raw_payload,
-            cleaned_payload,
-            status,
-            error_message,
-            created_at
-        )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-    """
-
-    with connection.cursor() as cursor:
-        for record in records:
-            cursor.execute(
-                insert_sql,
-                (
-                    record["task_id"],
-                    record["source"],
-                    record["url"],
-                    record["title"],
-                    record["content"],
-                    Jsonb(record["raw_payload"]) if record["raw_payload"] is not None else None,
-                    Jsonb(record["cleaned_payload"]) if record["cleaned_payload"] is not None else None,
-                    record["status"],
-                    record["error_message"],
-                    datetime.now(timezone.utc),
-                ),
-            )
-
-
-def run_processor() -> None:
-    redis_client = get_redis_client()
-    db_connection = get_db_connection()
-
-    logger.info("Processor started")
-
-    while True:
-        queue_item = redis_client.blpop(PROCESS_QUEUE_NAME, timeout=5)
-        if queue_item is None:
-            continue
-
-        _, payload = queue_item
-        message = json.loads(payload)
-        records = normalize_message(message)
-        persist_records(db_connection, records)
-        logger.info("Stored %s dataset record(s) for task %s", len(records), message["task_id"])
-
-
-def main() -> None:
     while True:
         try:
-            run_processor()
-        except Exception:
-            logger.exception("Processor loop crashed, retrying in 5 seconds")
+            item = redis_client.blpop(PROCESS_QUEUE, timeout=5)
+            if not item:
+                continue
+
+            _, payload = item
+            data = json.loads(payload)
+
+            url = data.get("url")
+            title = data.get("title")
+            description = data.get("description")
+            headings = data.get("headings", [])
+            links = data.get("links", [])
+
+            if not url:
+                logger.warning("Received payload without URL, skipping: %s", data)
+                continue
+
+            # Clean/Validate strings
+            title = title.strip() if isinstance(title, str) else None
+            description = description.strip() if isinstance(description, str) else None
+
+            # Clean/Validate lists
+            headings = [str(h).strip() for h in headings if str(h).strip()] if isinstance(headings, list) else []
+            links = [str(link).strip() for link in links if str(link).strip()] if isinstance(links, list) else []
+            headings_json = json.dumps(headings)
+            links_json = json.dumps(links)
+
+            insert_sql = """
+                INSERT INTO public.scraped_data (url, title, description, headings, links)
+                VALUES (%s, %s, %s, %s::jsonb, %s::jsonb)
+            """
+
+            logger.info("Attempting insert into public.scraped_data for URL: %s", url)
+
+            try:
+                with db_conn.cursor() as cursor:
+                    cursor.execute(
+                        insert_sql,
+                        (url, title, description, headings_json, links_json),
+                    )
+                db_conn.commit()
+                logger.info("Insert committed to public.scraped_data for URL: %s", url)
+            except psycopg.Error as e:
+                db_conn.rollback()
+                logger.exception("Insert failed and rolled back for URL %s: %s", url, e)
+                continue
+
+            logger.info("Successfully stored data for URL: %s", url)
+
+        except json.JSONDecodeError:
+            logger.error("Failed to decode JSON payload: %s", payload)
+        except psycopg.Error as e:
+            logger.error("Database error inserting data into scraped_data: %s", e)
+        except Exception as e:
+            logger.exception("Error processing task: %s", e)
+            time.sleep(2)
+
+
+def main():
+    while True:
+        try:
+            process_tasks()
+        except Exception as e:
+            logger.error("Processor loop crashed: %s. Retrying in 5 seconds...", e)
             time.sleep(5)
 
 

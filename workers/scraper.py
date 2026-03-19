@@ -2,60 +2,65 @@ from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
-from requests import RequestException
-from requests.exceptions import InvalidURL, SSLError
+from requests.exceptions import RequestException
 
 
 class ScrapeError(Exception):
     pass
 
 
-def _normalize_text(value: str | None) -> str | None:
-    if value is None:
+def _clean_text(text: str | None) -> str | None:
+    if not text:
         return None
-    cleaned = " ".join(value.split()).strip()
-    return cleaned or None
+    cleaned = " ".join(text.split()).strip()
+    return cleaned if cleaned else None
 
 
-def scrape_page(url: str, timeout: int = 20) -> dict[str, object]:
+def scrape_page(url: str, timeout: int = 15) -> dict:
+    """
+    Fetches the URL and extracts:
+    - title
+    - meta description
+    - headings (h1, h2, h3)
+    - links
+    """
     try:
         response = requests.get(
             url,
             timeout=timeout,
-            headers={"User-Agent": "LocalDataScrapingWorker/1.0"},
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ScraperBot/1.0"},
         )
         response.raise_for_status()
-    except requests.Timeout as exc:
-        raise ScrapeError(f"Request timed out for URL: {url}") from exc
-    except InvalidURL as exc:
-        raise ScrapeError(f"Invalid URL: {url}") from exc
-    except SSLError as exc:
-        raise ScrapeError(f"SSL error while fetching {url}: {exc}") from exc
-    except RequestException as exc:
-        raise ScrapeError(f"Network error while fetching {url}: {exc}") from exc
+    except RequestException as e:
+        raise ScrapeError(f"Network error fetching {url}: {e}") from e
 
     soup = BeautifulSoup(response.text, "html.parser")
 
-    title = _normalize_text(soup.title.string if soup.title else None)
-    description_tag = soup.find("meta", attrs={"name": "description"})
-    description = _normalize_text(description_tag.get("content") if description_tag else None)
+    # Title
+    title = _clean_text(soup.title.string if soup.title else None)
 
-    headings: list[str] = []
-    for tag_name in ("h1", "h2", "h3"):
-        for node in soup.find_all(tag_name):
-            text = _normalize_text(node.get_text(separator=" "))
+    # Meta Description
+    meta_desc_tag = soup.find("meta", attrs={"name": "description"})
+    description = _clean_text(meta_desc_tag.get("content") if meta_desc_tag else None)
+
+    # Headings
+    headings = []
+    for tag in ("h1", "h2", "h3"):
+        for node in soup.find_all(tag):
+            text = _clean_text(node.get_text())
             if text:
                 headings.append(text)
 
-    links: list[str] = []
-    for anchor in soup.find_all("a", href=True):
-        href = anchor.get("href")
-        if not href:
-            continue
-        absolute_link = urljoin(url, href)
-        if absolute_link.startswith("http://") or absolute_link.startswith("https://"):
-            links.append(absolute_link)
+    # Links
+    links = []
+    for a_tag in soup.find_all("a", href=True):
+        href = a_tag.get("href")
+        if href:
+            absolute_link = urljoin(url, href)
+            if absolute_link.startswith(("http://", "https://")):
+                links.append(absolute_link)
 
+    # Dedup links while preserving order
     unique_links = list(dict.fromkeys(links))
 
     return {

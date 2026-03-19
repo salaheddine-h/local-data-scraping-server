@@ -46,6 +46,54 @@ def get_db_connection() -> psycopg.Connection:
     return psycopg.connect(DATABASE_URL, row_factory=dict_row)
 
 
+def _normalize_jsonb_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if value is None:
+        return []
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, list) else []
+        except json.JSONDecodeError:
+            return []
+    return []
+
+
+def _fetch_latest_results(limit: int) -> list[dict[str, Any]]:
+    query = """
+        SELECT id, url, title, description, headings, links, created_at
+        FROM scraped_data
+        ORDER BY id DESC
+        LIMIT %s;
+    """
+
+    with get_db_connection() as connection:
+        print(
+            f"DB connection success: db={connection.info.dbname}, host={connection.info.host}"
+        )
+        with connection.cursor() as cursor:
+            cursor.execute(query, [limit])
+            rows = cursor.fetchall()
+            print(f"Rows fetched from scraped_data: {len(rows)}")
+
+    normalized_rows: list[dict[str, Any]] = []
+    for row in rows:
+        normalized_rows.append(
+            {
+                "id": row["id"],
+                "url": row["url"],
+                "title": row["title"],
+                "description": row["description"],
+                "headings": _normalize_jsonb_list(row.get("headings")),
+                "links": _normalize_jsonb_list(row.get("links")),
+                "created_at": row["created_at"],
+            }
+        )
+
+    return normalized_rows
+
+
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     logger.exception("Unhandled error for %s %s", request.method, request.url.path)
@@ -77,51 +125,52 @@ def create_task(task: TaskCreate) -> dict[str, Any]:
     }
 
 
-@app.get("/datasets")
-def get_datasets(
+@app.get("/results")
+def get_results(limit: int = Query(default=10, ge=1, le=200)) -> dict[str, Any]:
+    try:
+        results = _fetch_latest_results(limit=limit)
+    except psycopg.errors.UndefinedTable as exc:
+        logger.exception("Table scraped_data does not exist")
+        raise HTTPException(status_code=503, detail="Results table unavailable") from exc
+    except psycopg.OperationalError as exc:
+        logger.exception("Database connection error while fetching results")
+        raise HTTPException(status_code=503, detail="Database connection failed") from exc
+    except psycopg.Error as exc:
+        logger.exception("Database error while fetching results")
+        raise HTTPException(status_code=500, detail="Failed to fetch results") from exc
+
+    return {"count": len(results), "data": results}
+
+
+@app.get("/scraped_data")
+def get_scraped_data(
     limit: int = Query(default=50, ge=1, le=500),
-    source: str | None = None,
-    status: str | None = None,
 ) -> dict[str, Any]:
     query = """
         SELECT
             id,
-            task_id,
-            source,
             url,
             title,
-            content,
-            cleaned_payload,
-            status,
-            error_message,
+            description,
+            headings,
+            links,
             created_at
-        FROM datasets
+        FROM scraped_data
+        ORDER BY created_at DESC
+        LIMIT %s
     """
-
-    conditions: list[str] = []
-    params: list[Any] = []
-
-    if source is not None:
-        conditions.append("source = %s")
-        params.append(source)
-
-    if status is not None:
-        conditions.append("status = %s")
-        params.append(status)
-
-    if conditions:
-        query = f"{query} WHERE {' AND '.join(conditions)}"
-
-    query = f"{query} ORDER BY created_at DESC LIMIT %s"
-    params.append(limit)
+    params: list[Any] = [limit]
 
     try:
         with get_db_connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(query, params)
                 rows = cursor.fetchall()
+    except psycopg.errors.UndefinedTable:
+        logger.warning("Table scraped_data does not exist yet")
+        return {"count": 0, "items": []}
     except psycopg.Error as exc:
-        logger.exception("Failed to read datasets")
+        logger.exception("Failed to read scraped_data")
         raise HTTPException(status_code=503, detail="Database unavailable") from exc
 
     return {"count": len(rows), "items": rows}
@@ -150,9 +199,16 @@ def get_status() -> dict[str, Any]:
     try:
         with get_db_connection() as connection:
             with connection.cursor() as cursor:
-                cursor.execute("SELECT COUNT(*) AS dataset_count FROM datasets")
-                dataset_count = cursor.fetchone()["dataset_count"]
-        status_report["postgres"] = {"status": "ok", "dataset_count": dataset_count}
+                cursor.execute("SELECT COUNT(*) AS scraped_data_count FROM scraped_data")
+                scraped_data_count = cursor.fetchone()["scraped_data_count"]
+        status_report["postgres"] = {"status": "ok", "scraped_data_count": scraped_data_count}
+    except psycopg.errors.UndefinedTable:
+        status_report["postgres"] = {
+            "status": "degraded",
+            "scraped_data_count": 0,
+            "error": "table scraped_data does not exist",
+        }
+        status_report["overall"] = "degraded"
     except psycopg.Error as exc:
         status_report["postgres"] = {"status": "down", "error": str(exc)}
         status_report["overall"] = "degraded"
