@@ -18,6 +18,11 @@ It reflects concepts used in modern backend and DevOps environments such as micr
 
 ---
 
+## 🌍 Status
+
+- ✅ Local environment ready
+- 🚧 Deployment in progress
+
 ## 📋 Table of Contents
 
 - [Overview](#-overview)
