@@ -23,10 +23,6 @@ It reflects concepts used in modern backend and DevOps environments such as micr
 - ✅ Local environment ready
 - 🚧 Deployment in progress
 
-## 🖼️ Preview
-
-![Architecture](./docs/architecture.png)
-
 ## 📋 Table of Contents
 
 - [Overview](#-overview)
