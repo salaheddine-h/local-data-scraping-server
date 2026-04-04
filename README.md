@@ -1,6 +1,6 @@
 # 🖥️ local-data-scraping-server
 
-> A self-contained, Docker-based local server infrastructure for automated web scraping, async data processing, and structured dataset storage — designed like a real backend system and runs entirely on your personal PC.
+> A scalable, Docker-based backend system for asynchronous web scraping and data processing using a queue-based architecture.
 
 ## 🚀 Why this project matters
 
