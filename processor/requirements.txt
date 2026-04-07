@@ -1,2 +1,4 @@
 psycopg[binary]==3.2.6
 redis==5.2.1
+beautifulsoup4>=4.12,<5
+certifi>=2024.7.4,<2027

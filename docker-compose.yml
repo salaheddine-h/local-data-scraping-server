@@ -19,6 +19,8 @@ services:
       SCRAPE_QUEUE_NAME: ${SCRAPE_QUEUE_NAME:-scrape_queue}
       PROCESS_QUEUE_NAME: ${PROCESS_QUEUE_NAME:-processing_tasks}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      REQUESTS_CA_BUNDLE: ${REQUESTS_CA_BUNDLE:-/usr/local/lib/python3.11/site-packages/certifi/cacert.pem}
+      SSL_CERT_FILE: ${SSL_CERT_FILE:-/usr/local/lib/python3.11/site-packages/certifi/cacert.pem}
     depends_on:
       postgres:
         condition: service_healthy
@@ -41,6 +43,8 @@ services:
       PROCESS_QUEUE_NAME: ${PROCESS_QUEUE_NAME:-processing_tasks}
       WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-5}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      REQUESTS_CA_BUNDLE: ${REQUESTS_CA_BUNDLE:-/usr/local/lib/python3.11/site-packages/certifi/cacert.pem}
+      SSL_CERT_FILE: ${SSL_CERT_FILE:-/usr/local/lib/python3.11/site-packages/certifi/cacert.pem}
     depends_on:
       redis:
         condition: service_healthy
@@ -54,6 +58,8 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       PROCESS_QUEUE_NAME: ${PROCESS_QUEUE_NAME:-processing_tasks}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      REQUESTS_CA_BUNDLE: ${REQUESTS_CA_BUNDLE:-/usr/local/lib/python3.11/site-packages/certifi/cacert.pem}
+      SSL_CERT_FILE: ${SSL_CERT_FILE:-/usr/local/lib/python3.11/site-packages/certifi/cacert.pem}
     depends_on:
       postgres:
         condition: service_healthy

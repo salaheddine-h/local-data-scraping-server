@@ -1,12 +1,6 @@
 # 🖥️ local-data-scraping-server
 
-> A scalable, Docker-based backend system for asynchronous web scraping and data processing using a queue-based architecture.
-
-## 🚀 Why this project matters
-
-This project simulates a real-world backend data pipeline used in production systems. It demonstrates how to design scalable, asynchronous architectures for handling large volumes of scraping tasks using queue-based processing and containerized services.
-
-It reflects concepts used in modern backend and DevOps environments such as microservices, message queues, and distributed workers.
+> A self-contained, Docker-based local server infrastructure for automated web scraping, async data processing, and structured dataset storage — designed like a real backend system and runs entirely on your personal PC.
 
 ![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat&logo=docker&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat&logo=fastapi&logoColor=white)
@@ -17,11 +11,6 @@ It reflects concepts used in modern backend and DevOps environments such as micr
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 
 ---
-
-## 🌍 Status
-
-- ✅ Local environment ready
-- 🚧 Deployment in progress
 
 ## 📋 Table of Contents
 
